@@ -1,0 +1,7 @@
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=4.9
+pandas>=2.1
+spacy>=3.6
+chemdataextractor>=1.0
+tqdm>=4.65

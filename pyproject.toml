@@ -1,0 +1,36 @@
+[project]
+name = "oer_scraper"
+version = "0.1.0"
+description = "Web scraping e extração de dados de artigos sobre OER (Oxygen Evolution Reaction) da Nature (2015–2025)."
+authors = [
+    { name = "Kayke Borges" }
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# Dependências principais
+dependencies = [
+    "requests",
+    "beautifulsoup4",
+    "pandas",
+    "numpy",
+    "tqdm",
+    "spacy",
+    "chemdataextractor",
+    "lxml",
+    "fake-useragent"
+]
+
+# Dependências futuras (opcionais)
+optional-dependencies = { pdf = ["pymupdf", "pytesseract", "pillow"], dev = ["pytest", "black", "flake8", "ipykernel"] }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+oer-scraper = "src.scraper_nature:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

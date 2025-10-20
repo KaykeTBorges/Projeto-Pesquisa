@@ -1,0 +1,2 @@
+[console_scripts]
+oer-scraper = src.scraper_nature:main

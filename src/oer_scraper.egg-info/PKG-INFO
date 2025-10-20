@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: oer_scraper
+Version: 0.1.0
+Summary: Web scraping e extração de dados de artigos sobre OER (Oxygen Evolution Reaction) da Nature (2015–2025).
+Author: Kayke Borges
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: requests
+Requires-Dist: beautifulsoup4
+Requires-Dist: pandas
+Requires-Dist: numpy
+Requires-Dist: tqdm
+Requires-Dist: spacy
+Requires-Dist: chemdataextractor
+Requires-Dist: lxml
+Requires-Dist: fake-useragent
+Provides-Extra: pdf
+Requires-Dist: pymupdf; extra == "pdf"
+Requires-Dist: pytesseract; extra == "pdf"
+Requires-Dist: pillow; extra == "pdf"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: flake8; extra == "dev"
+Requires-Dist: ipykernel; extra == "dev"

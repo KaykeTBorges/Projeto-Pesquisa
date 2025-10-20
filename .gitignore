@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environment (uv)
+.venv/
+uv.lock
+
+# Data folders
+data/raw/
+data/processed/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+debug.log
+
+# PDFs and supplementary files
+*.pdf
+*.png
+*.jpg
+
+# Cache
+.cache/
+*.gz
+*.zip
