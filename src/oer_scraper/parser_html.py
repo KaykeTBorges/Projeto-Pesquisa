@@ -1,125 +1,239 @@
-from pathlib import Path
 import pandas as pd
 import re
-from bs4 import BeautifulSoup
-from oer_scraper.utils import LOGGER, write_text_file
-from oer_scraper import config
 import spacy
+from bs4 import BeautifulSoup
+import os
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional
 
-# --- Inicializar NLP ---
-try:
-    nlp = spacy.load("en_core_web_sm")
-except Exception:
-    import spacy.cli
-    spacy.cli.download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
+# Importar configuração do mesmo pacote
+from . import config
 
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(config.BASE_DIR / 'parser.log'),
+        logging.StreamHandler()
+    ]
+)
 
-def extract_text_from_html(html_path: Path) -> str:
-    """
-    Lê o HTML e retorna o texto principal do artigo.
-    """
-    html_path = Path(html_path)
-    if not html_path.exists():
-        LOGGER.warning("HTML não encontrado: %s", html_path)
-        return ""
-    with open(html_path, "r", encoding="utf-8") as f:
-        html = f.read()
+class NatureHTMLParser:
+    """Parser para extrair informações técnicas de HTMLs de artigos da Nature"""
+    
+    def __init__(self):
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+            logging.info("Modelo spaCy carregado com sucesso")
+        except OSError:
+            logging.error("Modelo spaCy 'en_core_web_sm' não encontrado.")
+            logging.info("Execute: python -m spacy download en_core_web_sm")
+            raise
+        
+        self.overpotential_patterns = [
+            r'overpotential[\s\S]{0,200}?(\d+\.?\d*)\s*[mM]?[Vv]',
+            r'η[\s\S]{0,200}?(\d+\.?\d*)\s*[mM]?[Vv]',
+            r'(\d+\.?\d*)\s*[mM]?[Vv][\s\S]{0,200}?overpotential',
+            r'overpotential\s*of\s*(\d+\.?\d*)\s*[mM]?[Vv]',
+            r'η\s*=\s*(\d+\.?\d*)\s*[mM]?[Vv]'
+        ]
+        
+    def load_html(self, html_path: str) -> Optional[str]:
+        try:
+            path_obj = Path(html_path)
+            if not path_obj.exists():
+                logging.warning(f"Arquivo HTML não encontrado: {html_path}")
+                return None
+            
+            with open(path_obj, 'r', encoding='utf-8') as file:
+                return file.read()
+        except Exception as e:
+            logging.error(f"Erro ao carregar HTML {html_path}: {str(e)}")
+            return None
+    
+    def extract_main_text(self, html_content: str) -> str:
+        try:
+            soup = BeautifulSoup(html_content, 'lxml')
+            
+            article_body = soup.find('div', class_='c-article-body')
+            if article_body:
+                paragraphs = article_body.find_all('p')
+                text_parts = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
+                return ' '.join(text_parts)
+            
+            main_content = soup.find('main') or soup.find('article')
+            if main_content:
+                paragraphs = main_content.find_all('p')
+                text_parts = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 50]
+                return ' '.join(text_parts)
+            
+            paragraphs = soup.find_all('p')
+            text_parts = []
+            for p in paragraphs:
+                text = p.get_text(strip=True)
+                if len(text) > 50:
+                    text_parts.append(text)
+            
+            main_text = ' '.join(text_parts)
+            
+            if len(main_text) < 200:
+                logging.warning("Texto extraído muito curto")
+            
+            return main_text
+            
+        except Exception as e:
+            logging.error(f"Erro ao extrair texto do HTML: {str(e)}")
+            return ""
+    
+    def extract_overpotential(self, text: str) -> Optional[float]:
+        if not text:
+            return None
+            
+        text_lower = text.lower()
+        
+        for pattern in self.overpotential_patterns:
+            matches = re.findall(pattern, text_lower, re.IGNORECASE)
+            for match in matches:
+                try:
+                    value = float(match)
+                    context = re.search(pattern.replace(r'(\d+\.?\d*)', match), text_lower)
+                    if context:
+                        context_text = context.group(0)
+                        if ' v' in context_text and value < 10:
+                            value = value * 1000
+                    
+                    if 10 <= value <= 1000:
+                        logging.info(f"Overpotential encontrado: {value} mV")
+                        return round(value, 2)
+                except ValueError:
+                    continue
+        
+        return None
+    
+    def extract_key_terms(self, text: str) -> Dict[str, bool]:
+        if not text:
+            return {term: False for term in config.KEY_TERMS}
+            
+        text_lower = text.lower()
+        term_presence = {}
+        
+        for term in config.KEY_TERMS:
+            term_lower = term.lower()
+            pattern = r'\b' + re.escape(term_lower) + r'\b'
+            term_presence[term] = bool(re.search(pattern, text_lower, re.IGNORECASE))
+        
+        return term_presence
+    
+    def parse_single_article(self, row: pd.Series) -> Dict:
+        article_data = row.to_dict()
+        
+        html_path = row.get('html_path', '')
+        if not html_path:
+            logging.warning(f"Campo html_path vazio para: {row.get('title', 'Unknown')}")
+            return article_data
+        
+        if not os.path.exists(html_path):
+            logging.warning(f"HTML não encontrado: {html_path}")
+            return article_data
+        
+        html_content = self.load_html(html_path)
+        if not html_content:
+            return article_data
+        
+        main_text = self.extract_main_text(html_content)
+        article_data['text_length'] = len(main_text)
+        
+        if len(main_text) < 100:
+            logging.warning(f"Texto muito curto ({len(main_text)} chars) para: {row.get('title', 'Unknown')}")
+            return article_data
+        
+        overpotential = self.extract_overpotential(main_text)
+        article_data['overpotential_mv'] = overpotential
+        
+        key_terms = self.extract_key_terms(main_text)
+        article_data.update(key_terms)
+        
+        logging.info(f"Artigo processado: {row.get('title', 'Unknown')} "
+                    f"(Overpotential: {overpotential}, Texto: {len(main_text)} chars)")
+        
+        return article_data
+    
+    def process_all_articles(self) -> pd.DataFrame:
+        try:
+            if not os.path.exists(config.METADATA_CSV):
+                logging.error(f"Arquivo de metadados não encontrado: {config.METADATA_CSV}")
+                return pd.DataFrame()
+            
+            metadata_df = pd.read_csv(config.METADATA_CSV)
+            logging.info(f"Carregados {len(metadata_df)} artigos para processamento")
+            
+            if metadata_df.empty:
+                logging.warning("Nenhum artigo encontrado no CSV de metadados")
+                return pd.DataFrame()
+            
+            articles_with_html = metadata_df[metadata_df['html_path'].notna() & (metadata_df['html_path'] != '')]
+            logging.info(f"{len(articles_with_html)} artigos com caminhos de HTML válidos")
+            
+            if articles_with_html.empty:
+                logging.warning("Nenhum artigo com HTML válido encontrado")
+                return pd.DataFrame()
+            
+            processed_data = []
+            for idx, row in articles_with_html.iterrows():
+                try:
+                    article_result = self.parse_single_article(row)
+                    processed_data.append(article_result)
+                    
+                    if (idx + 1) % 5 == 0:
+                        logging.info(f"Processados {idx + 1}/{len(articles_with_html)} artigos")
+                        
+                except Exception as e:
+                    logging.error(f"Erro ao processar artigo {idx}: {str(e)}")
+                    processed_data.append(row.to_dict())
+            
+            result_df = pd.DataFrame(processed_data)
+            
+            os.makedirs(os.path.dirname(config.PROCESSED_DIR), exist_ok=True)
+            output_path = config.PROCESSED_DIR / "articles_parsed.csv"
+            result_df.to_csv(output_path, index=False, encoding='utf-8')
+            
+            logging.info(f"Processamento concluído. Resultados salvos em: {output_path}")
+            logging.info(f"Artigos processados com sucesso: {len(result_df)}")
+            
+            if not result_df.empty:
+                overpotential_count = result_df['overpotential_mv'].notna().sum()
+                logging.info(f"Artigos com overpotential extraído: {overpotential_count}")
+                
+                for term in config.KEY_TERMS[:10]:
+                    if term in result_df.columns:
+                        term_count = result_df[term].sum()
+                        logging.info(f"Artigos com '{term}': {term_count}")
+            
+            return result_df
+            
+        except Exception as e:
+            logging.error(f"Erro no processamento geral: {str(e)}")
+            return pd.DataFrame()
+
+def main():
+    """Função principal para executar parsing standalone"""
+    logging.info("Iniciando parser de artigos da Nature")
+    
     try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
-
-    # extrair texto relevante do artigo (ex: tags <p>)
-    paragraphs = soup.find_all("p")
-    text = " ".join([p.get_text(separator=" ", strip=True) for p in paragraphs])
-    return text
-
-
-def extract_overpotential(text: str) -> str:
-    """
-    Extrai sobrepotencial do texto usando regex.
-    Ex: '280 mV @ 10 mA cm−2'
-    """
-    pattern = r"(\d+\.?\d*)\s*mV(?:\s*@\s*(\d+\.?\d*)\s*mA\s*cm[\-−]?\d*)?"
-    match = re.search(pattern, text, re.IGNORECASE)
-    if match:
-        return match.group(0)
-    return ""
-
-
-def extract_key_terms(text: str, terms: list[str]) -> dict:
-    """
-    Procura por termos-chave do config.KEY_TERMS no texto.
-    Retorna dicionário term->primeiro match encontrado.
-    """
-    result = {}
-    lowered = text.lower()
-    for term in terms:
-        if term.lower() in lowered:
-            # simples: retorna o termo encontrado
-            result[term] = term
-    return result
-
-
-def extract_entities_with_nlp(text: str) -> dict:
-    """
-    Usa spaCy para extrair entidades químicas / materiais.
-    """
-    doc = nlp(text)
-    entities = {"materials": [], "conditions": []}
-    for ent in doc.ents:
-        # Exemplo: categorizar entidades por tipo
-        if ent.label_ in ["CHEMICAL", "MATERIAL", "ORG"]:
-            entities["materials"].append(ent.text)
+        parser = NatureHTMLParser()
+        result_df = parser.process_all_articles()
+        
+        if not result_df.empty:
+            logging.info("Pipeline de parsing concluída com sucesso!")
+            logging.info(f"Total de artigos processados: {len(result_df)}")
         else:
-            entities["conditions"].append(ent.text)
-    # remover duplicatas
-    entities["materials"] = list(set(entities["materials"]))
-    entities["conditions"] = list(set(entities["conditions"]))
-    return entities
+            logging.warning("Nenhum dado foi processado")
+            
+    except Exception as e:
+        logging.error(f"Erro na execução do parser: {str(e)}")
+        raise
 
-
-def parse_article_html(html_path: Path) -> dict:
-    """
-    Parser principal para um HTML de artigo.
-    Retorna dicionário com os campos técnicos.
-    """
-    text = extract_text_from_html(html_path)
-    if not text:
-        return {}
-
-    data = {}
-    data["overpotential"] = extract_overpotential(text)
-    data.update(extract_key_terms(text, config.KEY_TERMS))
-    data.update(extract_entities_with_nlp(text))
-    return data
-
-
-def parse_all_articles(metadata_csv: Path, output_csv: Path) -> None:
-    """
-    Itera sobre todos os artigos do CSV de metadados,
-    aplica parser técnico e salva CSV final.
-    """
-    df_meta = pd.read_csv(metadata_csv)
-    all_data = []
-
-    for idx, row in df_meta.iterrows():
-        html_path = Path(row.get("html_path", ""))
-        if not html_path.exists():
-            LOGGER.warning("HTML não encontrado para DOI %s", row.get("doi"))
-            continue
-
-        technical_data = parse_article_html(html_path)
-
-        # combinar metadados + extração técnica
-        combined = {**row.to_dict(), **technical_data}
-        all_data.append(combined)
-        LOGGER.info("Processado artigo %d/%d: %s", idx+1, len(df_meta), row.get("doi"))
-
-    if all_data:
-        df_final = pd.DataFrame(all_data)
-        df_final.to_csv(output_csv, index=False, encoding="utf-8")
-        LOGGER.info("Parser finalizado. CSV técnico salvo: %s", output_csv)
-    else:
-        LOGGER.info("Nenhum artigo processado pelo parser.")
+if __name__ == "__main__":
+    main()

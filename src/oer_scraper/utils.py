@@ -9,14 +9,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 
 # IMPORTA config (assume que config.py está ao lado em oer_scraper)
-try:
-    from oer_scraper import config
-except Exception:
-    # Caso de execução direta durante testes locais sem pacote instalado,
-    # tenta caminho relativo (útil em dev)
-    import sys
-    sys.path.append(str(Path(__file__).resolve().parents[2]))
-    from oer_scraper import config
+from src.oer_scraper import config
 
 def setup_logger(name: str = "oer_scraper", log_file: Optional[Path] = None, level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
