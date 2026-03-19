@@ -1,147 +1,92 @@
 import time
-import requests
-from bs4 import BeautifulSoup
+import re
 from pathlib import Path
 from typing import List, Dict, Optional
-
+import requests
+from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from oer_scraper import config
 from oer_scraper.logger import get_scraper_logger
 
 logger = get_scraper_logger()
 
 class Scraper:
-    """Scraper para artigos da Nature sobre OER"""
+    """Scraper robusto para Nature com controle de retentativa e unicidade de arquivos."""
 
     def __init__(self):
         self.base_url = config.BASE_URL
-        self.search_query = config.SEARCH_QUERY 
-        self.year_range = config.YEAR_RANGE
+        self.search_query = config.SEARCH_QUERY
         self.max_pages = config.MAX_PAGES
-        self.headers = config.HEADERS
-        self.request_delay = config.REQUEST_DELAY
-
         self.pdf_dir = config.PDF_DIR
         self.pdf_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Estratégia de Retentativa: se o servidor falhar, tenta novamente
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3, 
+            backoff_factor=1, 
+            status_forcelist=[429, 500, 502, 503, 504]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.headers.update(config.HEADERS)
+
+    def _sanitize_filename(self, title: str) -> str:
+        """Cria nome único baseado no título."""
+        title_clean = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")
+        return f"{title_clean[:60]}.pdf"
 
     def search_articles(self) -> List[Dict[str, str]]:
-        """Busca de artigos retorna os metadados"""
-
+        """Busca artigos na Nature e extrai URL e DOI."""
         articles = []
-
-        for page in range(1, self.max_pages+1):
-            params = {
-                "q": self.search_query,
-                "page": page,
-                "date_range": self.year_range
-            }
-
-            logger.info(f"Buscando página {page} da Nature")
-
-            response = requests.get(
-                self.base_url,
-                params=params,
-                headers=self.headers,
-                timeout=15
-            )
-
-            if response.status_code != 200:
-                logger.warning(f"Erro na busca: status {response.status_code}")
-                continue
-
+        for page in range(1, self.max_pages + 1):
+            logger.info(f"Buscando página {page}")
+            response = self.session.get(self.base_url, params={"q": self.search_query, "page": page})
+            
             soup = BeautifulSoup(response.text, "html.parser")
-
-            results = soup.select("article.u-full-height")
-            logger.info(f"{len(results)} artigos encontrados na página {page}")
-
-            for item in results:
+            for item in soup.select("article.u-full-height"):
                 title_tag = item.select_one("h3 a")
-                if not title_tag:
-                    continue
-
-                article_url = "https://www.nature.com" + title_tag["href"]
-
+                if not title_tag: continue
+                
+                href = title_tag["href"]
+                
                 articles.append({
                     "title": title_tag.text.strip(),
-                    "article_url": article_url
+                    "url": "https://www.nature.com" + href,
                 })
-
-            
-            time.sleep(self.request_delay)
-
+            time.sleep(config.REQUEST_DELAY)
         return articles
 
-    def get_pdf_url(self, article_url: str) -> Optional[str]:
-        """Acessa a página do artigo e tenta encontrar o PDF"""
-
-        response = requests.get(
-            article_url,
-            headers=self.headers,
-            timeout=15
-        )
-
-        if response.status_code != 200:
-            logger.warning(f"Erro ao acessar artigo: {article_url}")
-            return None
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        pdf_link = soup.find("a", attrs={"data-track-action": "download pdf"})
-        if not pdf_link:
-            logger.warning(f"PDF não encontrado: {article_url}")
-            return None
-
-        return "https://www.nature.com" + pdf_link["href"]
-
-
-    def download_pdf(self, pdf_url: str, filename: str) -> bool:
-        """Baixa o PDF e salva localmente"""
-
-        pdf_path = self.pdf_dir / filename
-
-        if pdf_path.exists():
-            logger.info(f"PDF já existe: {filename}")
-            return True
-
-        response = requests.get(
-            pdf_url,
-            headers=self.headers,
-            stream=True,
-            timeout=20
-        )
-
-        if response.status_code != 200:
-            logger.warning(f"Erro ao baixar PDF: {pdf_url}")
-            return False
+    def download_pdf(self, article: Dict) -> bool:
+        """Acessa página, encontra link e baixa o PDF."""
+        resp = self.session.get(article["url"])
+        soup = BeautifulSoup(resp.text, "html.parser")
         
-        with open(pdf_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        # Procura link de download
+        pdf_tag = soup.find("a", attrs={"data-track-action": "download pdf"})
+        if not pdf_tag: return False
+        
+        pdf_url = "https://www.nature.com" + pdf_tag["href"]
+        filename = self._sanitize_filename(article["title"])
+        filepath = self.pdf_dir / filename
+        
+        if filepath.exists(): return True
 
-        logger.info(f"PDF salvo: {filename}")
-        time.sleep(self.request_delay)
+        pdf_resp = self.session.get(pdf_url, stream=True)
+        with open(filepath, "wb") as f:
+            for chunk in pdf_resp.iter_content(8192):
+                f.write(chunk)
+        
+        logger.info(f"Baixado: {filename}")
         return True
 
-
-    def run(self) -> List[Path]:
-        """
-        Executa o scraper completo
-        busca artigos → baixa PDFs
-        """
-        downloaded_pdfs = []
-
+    def run(self):
+        """Execução robusta do pipeline."""
         articles = self.search_articles()
-
-        for article in articles:
-            pdf_url = self.get_pdf_url(article["article_url"])
-            if not pdf_url:
-                continue
-
-            safe_title = article["title"].replace(" ", "_").replace("/", "")
-            filename = f"{safe_title}.pdf"
-
-            success = self.download_pdf(pdf_url, filename)
-            if success:
-                downloaded_pdfs.append(self.pdf_dir / filename)
-
-        logger.info(f"Total de PDFs baixados: {len(downloaded_pdfs)}")
-        return downloaded_pdfs
+        for art in articles:
+            try:
+                if self.download_pdf(art):
+                    time.sleep(config.REQUEST_DELAY)
+            except Exception as e:
+                logger.error(f"Erro no download {art['title']}: {e}")
