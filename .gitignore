@@ -37,3 +37,5 @@ debug.log
 *.zip
 
 src/oer_scrapper.egg-info
+
+.env
