@@ -60,6 +60,12 @@ class Scraper:
 
     def download_pdf(self, article: Dict) -> bool:
         """Acessa página, encontra link e baixa o PDF."""
+        filename = self._sanitize_filename(article["title"])
+        filepath = self.pdf_dir / filename
+        
+        if filepath.exists(): 
+            return True
+
         resp = self.session.get(article["url"])
         soup = BeautifulSoup(resp.text, "html.parser")
         
@@ -68,11 +74,7 @@ class Scraper:
         if not pdf_tag: return False
         
         pdf_url = "https://www.nature.com" + pdf_tag["href"]
-        filename = self._sanitize_filename(article["title"])
-        filepath = self.pdf_dir / filename
         
-        if filepath.exists(): return True
-
         pdf_resp = self.session.get(pdf_url, stream=True)
         with open(filepath, "wb") as f:
             for chunk in pdf_resp.iter_content(8192):
